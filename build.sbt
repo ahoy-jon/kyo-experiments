@@ -10,7 +10,9 @@ val kioVersion = "1.0-RC1"
 
 libraryDependencies += "io.getkyo" %% "kyo-prelude" % kioVersion
 libraryDependencies += "io.getkyo" %% "kyo-core" % kioVersion
+libraryDependencies += "io.getkyo" %% "kyo-direct" % kioVersion
 libraryDependencies += "io.getkyo" %% "kyo-combinators" % kioVersion
+
 
 scalacOptions ++= Seq(
   "-Wvalue-discard",
