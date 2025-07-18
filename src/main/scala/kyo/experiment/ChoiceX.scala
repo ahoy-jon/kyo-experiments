@@ -1,9 +1,11 @@
 package kyo.experiment
 
 import kyo.*
-import kyo.experiment
+import kyo.Chunk.internal.Append
 import kyo.experiment.ChoiceConstraint.Op
 import kyo.kernel.*
+import scala.collection.immutable.AbstractSeq
+import scala.collection.immutable.LinearSeq
 
 sealed trait ChoiceConstraint extends ArrowEffect[ChoiceConstraint.Op, Id]
 
@@ -89,9 +91,9 @@ sealed trait ChoiceJunction extends ArrowEffect[ChoiceJunction.Op, Id]
 
 object ChoiceJunction:
     enum Op[+Out]:
-        case Or[A](seq: Seq[A < ChoiceX])              extends Op[A]
-        case And[A, B](a: A < ChoiceX, b: B < ChoiceX) extends Op[(A, B)]
-        case AndSeq[A](seq: Seq[A < ChoiceX])          extends Op[Seq[A]]
+        case Or[A](seq: Seq[A < ChoiceX])                                   extends Op[A]
+        case And[Left, Right](left: Left < ChoiceX, right: Right < ChoiceX) extends Op[(Left, Right)]
+        // case AndSeq[A](seq: Seq[A < ChoiceX])          extends Op[Seq[A]]
     end Op
 end ChoiceJunction
 
@@ -104,11 +106,15 @@ object ChoiceX:
     def or[A](a: A < ChoiceX*)(using Frame): (A < ChoiceX)          = orSeq(a)
     def orSeq[A](seq: Seq[A < ChoiceX])(using Frame): (A < ChoiceX) = ArrowEffect.suspend(Tag[ChoiceJunction], ChoiceJunction.Op.Or(seq))
 
-    def and[A, B](a: A < ChoiceX, b: B < ChoiceX)(using Frame): (A, B) < ChoiceX =
-        ArrowEffect.suspend(Tag[ChoiceJunction], ChoiceJunction.Op.And(a, b))
+    def and[A, B](left: A < ChoiceX, right: B < ChoiceX)(using Frame): (A, B) < ChoiceX =
+        ArrowEffect.suspend(Tag[ChoiceJunction], ChoiceJunction.Op.And(left, right))
 
     def andSeq[A](a: Seq[A < ChoiceX])(using Frame): Seq[A] < ChoiceX =
-        ArrowEffect.suspend(Tag[ChoiceJunction], ChoiceJunction.Op.AndSeq(a))
+        a match
+            case Nil => Nil
+            case x :: xs => and(x, andSeq(xs)).map({
+                    case (x, xs) => x +: xs
+                })
 
     type Distinct[B] = ChoiceConstraint.Distinct[B]
 
@@ -118,9 +124,59 @@ object ChoiceX:
         export ChoiceConstraint.Distinct.init
 
     def run[A, S](v: A < (ChoiceX & S))(using Frame): Chunk[A] < S =
-        def branch(allStates: Map[Any, Any], v: Chunk[A] < (S & ChoiceX)): Chunk[A] < S =
-            // ArrowEffect.handleLoop don't exist for two effects at the same time
-            // need to redo
+
+        type AllStates = Map[Any, Any]
+
+        case class Poll[+B](value: Maybe[B], nexts: Chunk[Poll[B] < (ChoiceX & S)]):
+
+            def addNext[B1 >: B](next: (Poll[B1] < (ChoiceX & S))*): Poll[B1] = copy(nexts = nexts ++ next)
+        end Poll
+
+        object Poll:
+            def empty[B]: Poll[B] = Poll(Maybe.Absent, Chunk.empty)
+
+        case class TrueZip[L, R](
+            lefts: Chunk[L],
+            rights: Chunk[R],
+            nextLefts: Chunk[Poll[L] < (S & ChoiceX)],
+            nextRights: Chunk[Poll[R] < (S & ChoiceX)]
+        ):
+            def runLeft[C](v: Poll[L] < (S & ChoiceX), f: (L, R) => Poll[C] < (S & ChoiceX)): Poll[C] < (S & ChoiceX) =
+                v.map {
+                    case Poll(Maybe.Absent, nexts) => copy(nextLefts = nexts ++ nextLefts).run(f)
+                    case Poll(Maybe.Present(left), nexts) =>
+                        val continue      = copy(lefts = lefts :+ left, nextLefts = nexts ++ nextLefts).run(f)
+                        val applyOnRights = rights.map(right => f(left, right))
+                        Poll(Maybe.Absent, applyOnRights :+ continue)
+                }
+
+            def runRight[C](v: Poll[R] < (S & ChoiceX), f: (L, R) => Poll[C] < (S & ChoiceX)): Poll[C] < (S & ChoiceX) =
+                v.map {
+                    case Poll(Maybe.Absent, nexts) => copy(nextRights = nexts ++ nextRights).run(f)
+                    case Poll(Maybe.Present(right), nexts) =>
+                        val continue     = copy(rights = rights :+ right, nextRights = nexts ++ nextRights).run(f)
+                        val applyOnLefts = lefts.map(left => f(left, right))
+                        Poll(Maybe.Absent, applyOnLefts :+ continue)
+                }
+
+            def run[C](f: (L, R) => Poll[C] < (S & ChoiceX)): Poll[C] < (S & ChoiceX) =
+                inline def goLeft = nextLefts match
+                    case Chunk()       => Kyo.lift(Poll.empty[C])
+                    case Chunk(x, xs*) => copy(nextLefts = Chunk.from(xs)).runLeft(x, f)
+
+                inline def goRight = nextRights match
+                    case Chunk()       => goLeft
+                    case Chunk(x, xs*) => copy(nextRights = Chunk.from(xs)).runRight(x, f)
+
+                if lefts.isEmpty then
+                    goLeft
+                else
+                    goRight
+                end if
+            end run
+        end TrueZip
+
+        def loopPoll[B](allStates: AllStates, v: Poll[B] < (ChoiceX & S))(using Frame): Poll[B] < S =
             ArrowEffect.handle(Tag[ChoiceConstraint], Tag[Choice], Tag[ChoiceJunction], v)(
                 [C] =>
                     (input, cont) =>
@@ -131,26 +187,28 @@ object ChoiceX:
                                     case None        => constraint.init(index, value)
 
                                 nextState match
-                                    case Maybe.Absent         => Chunk.empty
-                                    case Maybe.Present(state) => branch(allStates + (constraint.id -> state), cont(()))
+                                    case Maybe.Absent         => Poll.empty
+                                    case Maybe.Present(state) => loopPoll(allStates + (constraint.id -> state), cont(()))
                     ),
                 [C] =>
                     (input, cont) =>
-                        Kyo.foreachConcat(Chunk.from(input))(a => branch(allStates, cont(a))),
+                        Poll[B](Maybe.Absent, Chunk.from(input).map(a => loopPoll(allStates, cont(a)))),
                 [C] =>
                     (input, cont) =>
-                        //optimize to avoid explosion
-
                         (input match
-                            case ChoiceJunction.Op.Or(seq) =>
-                                Kyo.foreachConcat(Chunk.from(seq))(c => branch(allStates, c.map(cont)))
+                                case ChoiceJunction.Op.Or(seq) =>
+                                    Poll[B](Maybe.Absent, Chunk.from(seq).map(a => loopPoll(allStates, a.map(cont))))
 
-                            case ChoiceJunction.Op.AndSeq(seq) =>
-                                Kyo.foreach(seq)(identity).map(cont)
+                                case ChoiceJunction.Op.And(left, right) =>
+                                    TrueZip(
+                                        Chunk.empty,
+                                        Chunk.empty,
+                                        Chunk(loopPoll(allStates, left.map(left => Poll(Maybe.Present(left), Chunk())))),
+                                        Chunk(loopPoll(allStates, right.map(right => Poll(Maybe.Present(right), Chunk()))))
+                                    ).run((l, r) => cont((l, r)))
 
-                            case ChoiceJunction.Op.And(a, b) =>
-                                //still monadic, should pull the first result of a, keep it, then the first result of b, cont
-                                //(1, 2, 3), (a, b, c)
+                                // still monadic, should pull the first result of a, keep it, then the first result of b, cont
+                                // (1, 2, 3), (a, b, c)
                                 // compute 1
                                 // compute a
                                 // cont (1, a)
@@ -166,11 +224,18 @@ object ChoiceX:
                                 // cont (3, a)
                                 // cont (3, b)
                                 // cont (3, c)
-                                Kyo.zip(a,b).map(cont)
-                            )
+
+                    )
             )
 
-        branch(Map.empty, v.map(a => Chunk(a)))
+        def unfold[X](poll: Poll[X]): Chunk[X] < S =
+            Kyo.foldLeft(poll.nexts)(poll.value.toChunk)({
+                case (res, n) =>
+                    loopPoll[X](Map.empty, n).map(unfold).map(res ++ _)
+            })
+
+        loopPoll(Map.empty, v.map(a => Poll(Maybe(a), Chunk.empty))).map(unfold)
+
     end run
 
     // unoptimized foreach
