@@ -21,7 +21,7 @@ object Board:
                     Position(row, col)
 
         extension [A](seq: Seq[A < ChoiceX] < ChoiceX)
-            def distinctOn[B](f: A => B): Seq[A < ChoiceX] < ChoiceX =
+            def distinctOn[B](f: A => B)(using canEqual: CanEqual[B, B]): Seq[A < ChoiceX] < ChoiceX =
                 seq.map: seq =>
                     ChoiceX.distinctWith(seq)(f)
         end extension
@@ -67,7 +67,7 @@ object LatinSquare:
 
     def solve(latinSquare: LatinSquare[Cell]): LatinSquare[Id] < ChoiceX =
 
-        def distinctCells[A](seq: Seq[Cell[A]]): Seq[Cell[A]] < ChoiceX =
+        def distinctCells[A](seq: Seq[Cell[A]])(using canEqual: CanEqual[A, A]): Seq[Cell[A]] < ChoiceX =
             ChoiceX.distinctWith(seq)(identity)
 
         val constrained: LatinSquare[Cell] < ChoiceX =

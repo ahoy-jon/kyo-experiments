@@ -1,11 +1,8 @@
 package kyo.experiment
 
 import kyo.*
-import kyo.Chunk.internal.Append
 import kyo.experiment.ChoiceConstraint.Op
 import kyo.kernel.*
-import scala.collection.immutable.AbstractSeq
-import scala.collection.immutable.LinearSeq
 
 sealed trait ChoiceConstraint extends ArrowEffect[ChoiceConstraint.Op, Id]
 
@@ -20,19 +17,25 @@ object ChoiceConstraint:
         type State
         def init(index: Int, value: B): Maybe[State]
         def continue(state: State)(index: Int, value: B): Maybe[State]
+
+        def merge(base: State, left: State, right: State): Maybe[State]
+
         final def contramap[A](f: A => B): Constraint[A] < ChoiceConstraint = new ConstraintContramap(this, f)
     end Constraint
 
     object Constraint:
         private[kyo] class Identity extends Serializable
 
-    class ConstraintContramap[-A, B](val base: Constraint[B], f: A => B) extends Constraint[A]:
-        override type State = base.State
-        override def init(index: Int, value: A): Maybe[base.State]                        = base.init(index, f(value))
-        override def continue(state: base.State)(index: Int, value: A): Maybe[base.State] = base.continue(state)(index, f(value))
+    class ConstraintContramap[-A, B](val constraint: Constraint[B], f: A => B) extends Constraint[A]:
+        override type State = constraint.State
+        override def init(index: Int, value: A): Maybe[State]                   = constraint.init(index, f(value))
+        override def continue(state: State)(index: Int, value: A): Maybe[State] = constraint.continue(state)(index, f(value))
+
+        override def merge(base: State, left: State, right: State): Maybe[State] = constraint.merge(base, left, right)
+
     end ConstraintContramap
 
-    class Distinct[B] private () extends Constraint[B]:
+    class Distinct[B](using CanEqual[B, B]) extends Constraint[B]:
         type State = Set[B]
 
         override def init(index: Int, value: B): Maybe[Set[B]] = Maybe(Set(value))
@@ -41,10 +44,14 @@ object ChoiceConstraint:
 
         def check(value: B)(using Frame): Unit < ChoiceConstraint =
             ArrowEffect.suspend(Tag[experiment.ChoiceConstraint], Op.Continue(this, 0, value))
+
+        override def merge(base: Set[B], left: Set[B], right: Set[B]): Maybe[Set[B]] =
+            val intersection = left.intersect(right)
+            if base == intersection then Maybe(left ++ right) else Maybe.Absent
     end Distinct
 
     object Distinct:
-        def init[B](using frame: Frame): Distinct[B] < ChoiceConstraint = Effect.deferInline(new Distinct[B]())
+        def init[B](using frame: Frame, canEqual: CanEqual[B, B]): Distinct[B] < ChoiceConstraint = Effect.deferInline(new Distinct[B]())
 
     class Equal[B](using CanEqual[B, B]) extends Constraint[B]:
         type State = B
@@ -54,16 +61,18 @@ object ChoiceConstraint:
 
         def check(value: B)(using frame: Frame): Unit < ChoiceConstraint =
             ArrowEffect.suspend(Tag[experiment.ChoiceConstraint], Op.Continue(this, 0, value))
+
+        override def merge(base: B, left: B, right: B): Maybe[B] = if left == right then Maybe(left) else Maybe.Absent
     end Equal
 
-    def distinctWith[A, S, B](seq: Seq[A < S])(f: A => B)(using Frame): Seq[A < (S & ChoiceConstraint)] < ChoiceConstraint =
+    def distinctWith[A, S, B](seq: Seq[A < S])(f: A => B)(using Frame, CanEqual[B, B]): Seq[A < (S & ChoiceConstraint)] < ChoiceConstraint =
         Distinct.init[B].map: distinct =>
             def handle(v: A < (S & ChoiceConstraint)): A < (S & ChoiceConstraint) =
                 v.map(a => distinct.check(f(a)) *> a)
 
             seq.map(handle)
 
-    def distinct[A, S](seq: Seq[A < S])(using Frame): Seq[A < (S & ChoiceConstraint)] < ChoiceConstraint =
+    def distinct[A, S](seq: Seq[A < S])(using Frame, CanEqual[A, A]): Seq[A < (S & ChoiceConstraint)] < ChoiceConstraint =
         distinctWith(seq)(identity)
 
     def run[A, S](v: A < (ChoiceConstraint & S))(using Frame): Maybe[A] < S =
@@ -91,8 +100,8 @@ sealed trait ChoiceJunction extends ArrowEffect[ChoiceJunction.Op, Id]
 
 object ChoiceJunction:
     enum Op[+Out]:
-        case Or[A](seq: Seq[A < ChoiceX])                                   extends Op[A]
-        case And[Left, Right](left: Left < ChoiceX, right: Right < ChoiceX) extends Op[(Left, Right)]
+        case Or[A](seq: Seq[A < ChoiceX])                                                  extends Op[A]
+        case And[Left, Right, S](left: Left < (ChoiceX & S), right: Right < (ChoiceX & S)) extends Op[(Left, Right) < S]
         // case AndSeq[A](seq: Seq[A < ChoiceX])          extends Op[Seq[A]]
     end Op
 end ChoiceJunction
@@ -106,10 +115,10 @@ object ChoiceX:
     def or[A](a: A < ChoiceX*)(using Frame): (A < ChoiceX)          = orSeq(a)
     def orSeq[A](seq: Seq[A < ChoiceX])(using Frame): (A < ChoiceX) = ArrowEffect.suspend(Tag[ChoiceJunction], ChoiceJunction.Op.Or(seq))
 
-    def and[A, B](left: A < ChoiceX, right: B < ChoiceX)(using Frame): (A, B) < ChoiceX =
-        ArrowEffect.suspend(Tag[ChoiceJunction], ChoiceJunction.Op.And(left, right))
+    def and[A, B, S](left: A < (ChoiceX & S), right: B < (ChoiceX & S))(using Frame): (A, B) < (ChoiceX & S) =
+        ArrowEffect.suspendWith(Tag[ChoiceJunction], ChoiceJunction.Op.And(left, right))(identity)
 
-    def andSeq[A](a: Seq[A < ChoiceX])(using Frame): Seq[A] < ChoiceX =
+    def andSeq[A, S](a: Seq[A < (ChoiceX & S)])(using Frame): Seq[A] < (ChoiceX & S) =
         a match
             case Nil => Nil
             case x :: xs => and(x, andSeq(xs)).map({
@@ -135,6 +144,12 @@ object ChoiceX:
         object Poll:
             def empty[B]: Poll[B] = Poll(Maybe.Absent, Chunk.empty)
 
+        extension [X, S1](v: X < S1)
+            def toPoll: Poll[X] < S1 = v.map(x => Poll(Maybe(x), Chunk.empty))
+
+        extension [X, S1](v: X < (S1 & ChoiceX))
+            def castS: X < ChoiceX = v.asInstanceOf
+
         case class TrueZip[L, R](
             lefts: Chunk[L],
             rights: Chunk[R],
@@ -142,22 +157,24 @@ object ChoiceX:
             nextRights: Chunk[Poll[R] < (S & ChoiceX)]
         ):
             def runLeft[C](v: Poll[L] < (S & ChoiceX), f: (L, R) => Poll[C] < (S & ChoiceX)): Poll[C] < (S & ChoiceX) =
-                v.map {
-                    case Poll(Maybe.Absent, nexts) => copy(nextLefts = nexts ++ nextLefts).run(f)
-                    case Poll(Maybe.Present(left), nexts) =>
-                        val continue      = copy(lefts = lefts :+ left, nextLefts = nexts ++ nextLefts).run(f)
-                        val applyOnRights = rights.map(right => f(left, right))
-                        Poll(Maybe.Absent, applyOnRights :+ continue)
-                }
+                v.map(poll =>
+                    poll.value match
+                        case Maybe.Absent => copy(nextLefts = poll.nexts ++ nextLefts).run(f)
+                        case Maybe.Present(left) =>
+                            val continue      = copy(lefts = lefts :+ left, nextLefts = poll.nexts ++ nextLefts).run(f)
+                            val applyOnRights = rights.map(right => f(left, right))
+                            Poll(Maybe.Absent, applyOnRights :+ continue)
+                )
 
             def runRight[C](v: Poll[R] < (S & ChoiceX), f: (L, R) => Poll[C] < (S & ChoiceX)): Poll[C] < (S & ChoiceX) =
-                v.map {
-                    case Poll(Maybe.Absent, nexts) => copy(nextRights = nexts ++ nextRights).run(f)
-                    case Poll(Maybe.Present(right), nexts) =>
-                        val continue     = copy(rights = rights :+ right, nextRights = nexts ++ nextRights).run(f)
-                        val applyOnLefts = lefts.map(left => f(left, right))
-                        Poll(Maybe.Absent, applyOnLefts :+ continue)
-                }
+                v.map(poll =>
+                    poll.value match
+                        case Maybe.Absent => copy(nextRights = poll.nexts ++ nextRights).run(f)
+                        case Maybe.Present(right) =>
+                            val continue     = copy(rights = rights :+ right, nextRights = poll.nexts ++ nextRights).run(f)
+                            val applyOnLefts = lefts.map(left => f(left, right))
+                            Poll(Maybe.Absent, applyOnLefts :+ continue)
+                )
 
             def run[C](f: (L, R) => Poll[C] < (S & ChoiceX)): Poll[C] < (S & ChoiceX) =
                 inline def goLeft = nextLefts match
@@ -203,9 +220,9 @@ object ChoiceX:
                                     TrueZip(
                                         Chunk.empty,
                                         Chunk.empty,
-                                        Chunk(loopPoll(allStates, left.map(left => Poll(Maybe.Present(left), Chunk())))),
-                                        Chunk(loopPoll(allStates, right.map(right => Poll(Maybe.Present(right), Chunk()))))
-                                    ).run((l, r) => cont((l, r)))
+                                        Chunk(loopPoll(allStates, left.toPoll.castS)),
+                                        Chunk(loopPoll(allStates, right.toPoll.castS))
+                                    ).run((l, r) => cont(Kyo.lift((l, r))))
 
                                 // still monadic, should pull the first result of a, keep it, then the first result of b, cont
                                 // (1, 2, 3), (a, b, c)
@@ -227,6 +244,7 @@ object ChoiceX:
 
                     )
             )
+        end loopPoll
 
         def unfold[X](poll: Poll[X]): Chunk[X] < S =
             Kyo.foldLeft(poll.nexts)(poll.value.toChunk)({
