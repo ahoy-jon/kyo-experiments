@@ -2,7 +2,7 @@ package experiment
 
 import kyo.*
 import kyo.experiment.Cell
-import kyo.experiment.ChoiceX
+import kyo.experiment.Logic
 import kyo.kernel.Effect
 import scala.util.Try
 
@@ -10,23 +10,23 @@ opaque type Board = Seq[Int]
 
 object Board:
 
-    def queens(n: Int): Board < ChoiceX =
+    def queens(n: Int): Board < Logic =
         case class Position(row: Int, col: Int):
             def diag1: Int = row - col
             def diag2: Int = row + col
 
-        val allPositions: Seq[Position < ChoiceX] =
+        val allPositions: Seq[Position < Logic] =
             (0 until n).map: row =>
-                Choice.evalSeq(0 until n).map: col =>
+                Logic.range(0, n).map: col =>
                     Position(row, col)
 
-        extension [A](seq: Seq[A < ChoiceX] < ChoiceX)
-            def distinctOn[B](f: A => B)(using canEqual: CanEqual[B, B]): Seq[A < ChoiceX] < ChoiceX =
+        extension [A](seq: Seq[A < Logic] < Logic)
+            def distinctOn[B](f: A => B)(using canEqual: CanEqual[B, B]): Seq[A < Logic] < Logic =
                 seq.map: seq =>
-                    ChoiceX.distinctWith(seq)(f)
+                    Logic.distinctWith(seq)(f)
         end extension
 
-        val constrained: Seq[Position < ChoiceX] < ChoiceX =
+        val constrained: Seq[Position < Logic] < Logic =
             allPositions
                 .distinctOn(_.row) // true by construction
                 .distinctOn(_.col)
@@ -41,7 +41,7 @@ object Board:
 end Board
 
 @main def main() =
-    Stream.init(ChoiceX.run(Board.queens(8)))
+    Stream.init(Logic.run(Board.queens(8)))
         .tap(board => println(board))
         .fold(0)((count, _) => count + 1)
         .map(count => println(s"Total solutions: $count"))
@@ -65,12 +65,12 @@ end LatinSquare
 
 object LatinSquare:
 
-    def solve(latinSquare: LatinSquare[Cell]): LatinSquare[Id] < ChoiceX =
+    def solve(latinSquare: LatinSquare[Cell]): LatinSquare[Id] < Logic =
 
-        def distinctCells[A](seq: Seq[Cell[A]])(using canEqual: CanEqual[A, A]): Seq[Cell[A]] < ChoiceX =
-            ChoiceX.distinctWith(seq)(identity)
+        def distinctCells[A](seq: Seq[Cell[A]])(using canEqual: CanEqual[A, A]): Seq[Cell[A]] < Logic =
+            Logic.distinctWith(seq)(identity)
 
-        val constrained: LatinSquare[Cell] < ChoiceX =
+        val constrained: LatinSquare[Cell] < Logic =
             direct(latinSquare.mapRows(distinctCells).now.mapCols(distinctCells).now)
 
         constrained.map(_.traverse(identity))
@@ -83,13 +83,13 @@ object LatinSquare:
         val rows = Chunk.from(text.stripMargin.trim.linesIterator)
         val size = rows.length
 
-        val choice: Int < Choice = Choice.evalSeq(1 to size)
+        val choice: Int < Logic = Logic.range(0, size).map(_ + 1)
 
         if !rows.forall(_.length == size) then
             Abort.fail(ParseError.Oups)
         else
 
-            type F[A] = (A < Choice) < Abort[ParseError]
+            type F[A] = (A < Logic) < Abort[ParseError]
 
             def parseChar(c: Char): F[Int] = c match
                 case '.' => Kyo.lift(choice)
@@ -121,7 +121,7 @@ object TestLatinSquare extends KyoApp:
         LatinSquare.parse(text)
             .map(LatinSquare.solve)
             .map(solved => Console.printLine(solved.show) *> Console.printLine("-" * 5))
-            .handle(ChoiceX.run, Abort.run(_))
+            .handle(Logic.run, Abort.run(_))
 
     run:
         solve("""1.3.
