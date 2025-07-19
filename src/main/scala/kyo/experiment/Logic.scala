@@ -33,13 +33,12 @@ object Logic:
             def diff(next: S): Maybe[Diff]
             def next(diff: Diff): Maybe[S]
 
-
             def merge(left: S, right: S): Maybe[S] =
                 diff(left) match
-                    case Maybe.Absent        => Maybe.Absent
+                    case Maybe.Absent => Maybe.Absent
                     case Maybe.Present(_) => diff(right) match
-                        case Maybe.Absent   => Maybe.Absent
-                        case Maybe.Present(dR) => left.next(dR)
+                            case Maybe.Absent      => Maybe.Absent
+                            case Maybe.Present(dR) => left.next(dR)
 
             def merge(right: S): Maybe[S] =
                 diff(right) match
@@ -78,22 +77,20 @@ object Logic:
             override def merge(left: State[B], right: State[B]): Maybe[State[B]] =
                 val intersection = (set ++ left.set).intersect(set ++ right.set)
                 val res          = if set == intersection then Maybe(State(left.set ++ right.set)) else Maybe.Absent
-                println(s"merge: $set, $left, $right, $res")
                 res
             end merge
 
-            override def diff(next: State[B]): Maybe[Set[B]] = {
+            override def diff(next: State[B]): Maybe[Set[B]] =
                 val intersection = set.intersect(next.set)
-                if(intersection.nonEmpty) Maybe.Absent
+                if intersection.nonEmpty then Maybe.Absent
                 else Maybe(next.set -- set)
+            end diff
 
-            }
-
-            override def next(diff: Set[B]): Maybe[State[B]] = {
+            override def next(diff: Set[B]): Maybe[State[B]] =
                 val intersection = set.intersect(diff)
-                if(intersection.nonEmpty) Maybe.Absent
+                if intersection.nonEmpty then Maybe.Absent
                 else Maybe(State(set ++ diff))
-            }
+            end next
 
             def check(value: B): Maybe[State[B]] =
                 if set.contains(value) then Maybe.Absent else Maybe(State(set + value))
@@ -160,10 +157,8 @@ object Logic:
 
     def andSeq[A, S](a: Seq[A < (Logic & S)])(using Frame): Seq[A] < (Logic & S) =
         a match
-            case Nil => Nil
-            case x :: xs => and(x, andSeq(xs)).map({
-                    case (x, xs) => x +: xs
-                })
+            case Seq()       => Nil
+            case Seq(x, xs*) => and(x, andSeq(xs)).map((x, xs) => x +: xs)
 
     def run[A, S](v: A < (Logic & S))(using Frame): Chunk[A] < S =
 
@@ -242,7 +237,7 @@ object Logic:
                                         case Value.ValueAndStates(_, states) => states
                                         case _                               => baseState
                                 )
-                                
+
                                 state match
                                     case Maybe.Absent         => None
                                     case Maybe.Present(state) => Some(loopPoll(state, f(left, right.toMaybe.get)))
@@ -254,7 +249,7 @@ object Logic:
 
             def runRight[C](v: Poll[R] < (S & Logic), f: (L, R) => Poll[C] < (S & Logic)): Poll[C] < S =
                 loopPoll(baseState, v).map(poll =>
-                    
+
                     poll.value.toMaybe match
                         case Maybe.Absent => copy(nextRights = poll.nexts ++ nextRights).run(f)
                         case Maybe.Present(right) =>
@@ -274,7 +269,7 @@ object Logic:
                                         case _ =>
                                             baseState
                                 )
-                                
+
                                 state match
                                     case Maybe.Absent         => None
                                     case Maybe.Present(state) => Some(loopPoll(state, f(left.toMaybe.get, right)))
@@ -285,8 +280,6 @@ object Logic:
                 )
 
             def run[C](f: (L, R) => Poll[C] < (S & Logic)): Poll[C] < S =
-
-                println(s"run : base: $baseState, lefts: ${lefts}, rights: ${rights}")
 
                 inline def goLeft: Poll[C] < S = nextLefts match
                     case Chunk()       => Kyo.lift(Poll.empty[C])
@@ -319,24 +312,23 @@ object Logic:
                                     case Maybe.Present(state) => Loop.continue(allStates + (constraint.id -> state), cont(()))
 
                             case Op.Or(seq) =>
-                                Loop.continue(
-                                    allStates,
-                                    Kyo.lift(Poll[B](
-                                        Value.Empty,
-                                        Chunk.from(seq).map(a => loopPoll(allStates, a.map(a => cont(Kyo.lift(a))).castS))
-                                    ))
-                                )
+                                Loop.done(Poll[B](
+                                    Value.Empty,
+                                    Chunk.from(seq).map(a => loopPoll(allStates, a.map(a => cont(Kyo.lift(a))).castS))
+                                ))
 
                             case Logic.Op.And(left, right) =>
-                                CartesianProduct(
+                                Loop.continue(
                                     allStates,
-                                    Chunk.empty,
-                                    Chunk.empty,
-                                    Chunk(left.toPoll.castS),
-                                    Chunk(right.toPoll.castS)
-                                ).run((l, r) => cont(Kyo.lift((l, r)))).map(x => Loop.continue(allStates, Kyo.lift(x)))
+                                    CartesianProduct(
+                                        allStates,
+                                        Chunk.empty,
+                                        Chunk.empty,
+                                        Chunk(left.toPoll.castS),
+                                        Chunk(right.toPoll.castS)
+                                    ).run((l, r) => cont(Kyo.lift((l, r))))
+                                )
                     ),
-                
                 (state: AllStates, b: Poll[B]) =>
                     val newValue: Value[B] = b.value match
                         case Value.Empty   => Value.Empty

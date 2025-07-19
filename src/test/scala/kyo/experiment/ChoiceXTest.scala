@@ -32,9 +32,8 @@ object Board:
                 .distinctOn(_.diag1)
                 .distinctOn(_.diag2)
 
-        direct:
-            val c = constrained.now
-            c.map(_.now.col)
+        direct(Logic.andSeq(constrained.now).now.map(_.col))
+
     end queens
 
 end Board
