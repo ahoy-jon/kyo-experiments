@@ -3,7 +3,6 @@ package experiment
 import kyo.*
 import kyo.experiment.Cell
 import kyo.experiment.Logic
-import kyo.kernel.Effect
 import scala.util.Try
 
 opaque type Board = Seq[Int]

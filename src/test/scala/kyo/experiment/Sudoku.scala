@@ -51,7 +51,6 @@ object Sudoku:
 
         import Logic.distinct
 
-
         val constrained: Sudoku[Cell] < Logic =
             direct(sudoku.mapRows(distinct).now.mapCols(distinct).now.mapBoxes(distinct).now)
 
