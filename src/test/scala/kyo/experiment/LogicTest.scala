@@ -24,7 +24,7 @@ class LogicTest extends Test:
         }
 
         "and 2, 3" in run {
-            val res = constrained(2,3).map(seq => Logic.andSeq(seq)).handle(
+            val res = constrained(2, 3).map(seq => Logic.andSeq(seq)).handle(
                 Logic.run,
                 _.eval
             )

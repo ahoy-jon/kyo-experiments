@@ -22,8 +22,6 @@ object Logic:
         def init(index: Int, value: B): Maybe[State]
         def continue(state: State)(index: Int, value: B): Maybe[State]
 
-        def merge(base: State, left: State, right: State): Maybe[State]
-
         final def contramap[A](f: A => B): Constraint[A] < Logic = new ConstraintContramap(this, f)
     end Constraint
 
@@ -33,14 +31,14 @@ object Logic:
             def diff(next: S): Maybe[Diff]
             def next(diff: Diff): Maybe[S]
 
-            def merge(left: S, right: S): Maybe[S] =
+            final def merge(left: S, right: S): Maybe[S] =
                 diff(left) match
                     case Maybe.Absent => Maybe.Absent
                     case Maybe.Present(_) => diff(right) match
                             case Maybe.Absent      => Maybe.Absent
                             case Maybe.Present(dR) => left.next(dR)
 
-            def merge(right: S): Maybe[S] =
+            final def merge(right: S): Maybe[S] =
                 diff(right) match
                     case Maybe.Absent        => Maybe.Absent
                     case Maybe.Present(diff) => next(diff)
@@ -53,9 +51,8 @@ object Logic:
 
     class ConstraintContramap[-A, B](val constraint: Constraint[B], f: A => B) extends Constraint[A]:
         override type State = constraint.State
-        override def init(index: Int, value: A): Maybe[State]                    = constraint.init(index, f(value))
-        override def continue(state: State)(index: Int, value: A): Maybe[State]  = constraint.continue(state)(index, f(value))
-        override def merge(base: State, left: State, right: State): Maybe[State] = constraint.merge(base, left, right)
+        override def init(index: Int, value: A): Maybe[State]                   = constraint.init(index, f(value))
+        override def continue(state: State)(index: Int, value: A): Maybe[State] = constraint.continue(state)(index, f(value))
 
     end ConstraintContramap
 
@@ -68,17 +65,10 @@ object Logic:
         def check(value: B)(using Frame): Unit < Logic =
             ArrowEffect.suspend(Tag[Logic], Op.Continue(this, 0, value))
 
-        override def merge(base: State, left: State, right: State): Maybe[State] = base.merge(left, right)
     end Distinct
 
     object Distinct:
         class State[B](val set: Set[B])(using CanEqual[B, B]) extends Constraint.State[Set[B], State[B]]:
-
-            override def merge(left: State[B], right: State[B]): Maybe[State[B]] =
-                val intersection = (set ++ left.set).intersect(set ++ right.set)
-                val res          = if set == intersection then Maybe(State(left.set ++ right.set)) else Maybe.Absent
-                res
-            end merge
 
             override def diff(next: State[B]): Maybe[Set[B]] =
                 val intersection = set.intersect(next.set)
@@ -99,7 +89,8 @@ object Logic:
 
         end State
 
-        def init[B](using frame: Frame, canEqual: CanEqual[B, B]): Distinct[B] < Logic = Effect.deferInline(new Distinct[B]())
+        def init[B](using frame: Frame, canEqual: CanEqual[B, B]): Distinct[B] < Logic =
+            Effect.deferInline(new Distinct[B]())
     end Distinct
 
     class Equal[B](using CanEqual[B, B]) extends Constraint[B]:
@@ -113,16 +104,10 @@ object Logic:
         override def continue(state: Equal.State[B])(index: Int, value: B): Maybe[Equal.State[B]] =
             state.check(value)
 
-        override def merge(base: Equal.State[B], left: Equal.State[B], right: Equal.State[B]): Maybe[Equal.State[B]] =
-            base.merge(left, right)
     end Equal
 
     object Equal:
         class State[B](val value: B)(using CanEqual[B, B]) extends Constraint.State[Unit, State[B]]:
-
-            override def merge(left: State[B], right: State[B]): Maybe[State[B]] =
-                if value == left.value && left.value == right.value then Maybe(this) else Maybe.Absent
-
             override def diff(next: State[B]): Maybe[Unit] =
                 if value == next.value then Maybe(()) else Maybe.Absent
 
